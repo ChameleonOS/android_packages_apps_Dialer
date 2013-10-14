@@ -20,7 +20,6 @@
     <dimen name="dialpad_horizontal_margin">0dip</dimen>
     <dimen name="dialpad_vertical_margin">2dip</dimen>
     <dimen name="dialpad_digits_text_size">32sp</dimen>
-    <dimen name="dialer_buttons_height">270dp</dimen>
 
     <!-- Just used in landscape mode -->
     <dimen name="dialpad_digits_height">0px</dimen>
