@@ -16,7 +16,6 @@
 
 package com.android.dialer;
 
-import android.app.ActionBar;
 import android.app.Activity;
 import android.content.ContentResolver;
 import android.content.ContentUris;
@@ -55,12 +54,14 @@ import com.android.contacts.common.ContactPhotoManager;
 import com.android.contacts.common.CallUtil;
 import com.android.contacts.common.ClipboardUtils;
 import com.android.contacts.common.GeoUtil;
+import com.android.contacts.common.util.UriUtils;
 import com.android.dialer.BackScrollManager.ScrollableHeader;
 import com.android.dialer.calllog.CallDetailHistoryAdapter;
 import com.android.dialer.calllog.CallTypeHelper;
 import com.android.dialer.calllog.ContactInfo;
 import com.android.dialer.calllog.ContactInfoHelper;
 import com.android.dialer.calllog.PhoneNumberHelper;
+import com.android.dialer.calllog.PhoneNumberUtilsWrapper;
 import com.android.dialer.util.AsyncTaskExecutor;
 import com.android.dialer.util.AsyncTaskExecutors;
 import com.android.dialer.voicemail.VoicemailPlaybackFragment;
@@ -208,6 +209,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
         CallLog.Calls.TYPE,
         CallLog.Calls.COUNTRY_ISO,
         CallLog.Calls.GEOCODED_LOCATION,
+        CallLog.Calls.NUMBER_PRESENTATION,
     };
 
     static final int DATE_COLUMN_INDEX = 0;
@@ -216,6 +218,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
     static final int CALL_TYPE_COLUMN_INDEX = 3;
     static final int COUNTRY_ISO_COLUMN_INDEX = 4;
     static final int GEOCODED_LOCATION_COLUMN_INDEX = 5;
+    static final int NUMBER_PRESENTATION_COLUMN_INDEX = 6;
 
     private final View.OnClickListener mPrimaryActionListener = new View.OnClickListener() {
         @Override
@@ -262,7 +265,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
         mCallTypeHelper = new CallTypeHelper(getResources());
         mPhoneNumberHelper = new PhoneNumberHelper(mResources);
         mPhoneCallDetailsHelper = new PhoneCallDetailsHelper(mResources, mCallTypeHelper,
-                mPhoneNumberHelper);
+                new PhoneNumberUtilsWrapper());
         mVoicemailStatusHelper = new VoicemailStatusHelperImpl();
         mAsyncQueryHandler = new CallDetailActivityQueryHandler(this);
         mHeaderTextView = (TextView) findViewById(R.id.header_text);
@@ -277,7 +280,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
         mContactPhotoManager = ContactPhotoManager.getInstance(this);
         mProximitySensorManager = new ProximitySensorManager(this, mProximitySensorListener);
         mContactInfoHelper = new ContactInfoHelper(this, GeoUtil.getCurrentCountryIso(this));
-        configureActionBar();
+        getActionBar().setDisplayHomeAsUpEnabled(true);
         optionallyHandleVoicemail();
         if (getIntent().getBooleanExtra(EXTRA_FROM_NOTIFICATION, false)) {
             closeSystemDialogs();
@@ -311,7 +314,8 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
             playbackFragment.setArguments(fragmentArguments);
             voicemailContainer.setVisibility(View.VISIBLE);
             getFragmentManager().beginTransaction()
-                    .add(R.id.voicemail_container, playbackFragment).commitAllowingStateLoss();
+                    .add(R.id.voicemail_container, playbackFragment)
+                    .commitAllowingStateLoss();
             mAsyncQueryHandler.startVoicemailStatusQuery(getVoicemailUri());
             markVoicemailAsRead(getVoicemailUri());
         } else {
@@ -421,6 +425,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 // first.
                 PhoneCallDetails firstDetails = details[0];
                 mNumber = firstDetails.number.toString();
+                final int numberPresentation = firstDetails.numberPresentation;
                 final Uri contactUri = firstDetails.contactUri;
                 final Uri photoUri = firstDetails.photoUri;
 
@@ -428,9 +433,11 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 mPhoneCallDetailsHelper.setCallDetailsHeader(mHeaderTextView, firstDetails);
 
                 // Cache the details about the phone number.
-                final boolean canPlaceCallsTo = mPhoneNumberHelper.canPlaceCallsTo(mNumber);
-                final boolean isVoicemailNumber = mPhoneNumberHelper.isVoicemailNumber(mNumber);
-                final boolean isSipNumber = mPhoneNumberHelper.isSipNumber(mNumber);
+                final boolean canPlaceCallsTo =
+                    PhoneNumberUtilsWrapper.canPlaceCallsTo(mNumber, numberPresentation);
+                final PhoneNumberUtilsWrapper phoneUtils = new PhoneNumberUtilsWrapper();
+                final boolean isVoicemailNumber = phoneUtils.isVoicemailNumber(mNumber);
+                final boolean isSipNumber = phoneUtils.isSipNumber(mNumber);
 
                 // Let user view contact details if they exist, otherwise add option to create new
                 // contact from this number.
@@ -445,7 +452,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                     nameOrNumber = firstDetails.number;
                 }
 
-                if (contactUri != null) {
+                if (contactUri != null && !UriUtils.isEncodedContactUri(contactUri)) {
                     mainActionIntent = new Intent(Intent.ACTION_VIEW, contactUri);
                     // This will launch People's detail contact screen, so we probably want to
                     // treat it as a separate People task.
@@ -509,7 +516,9 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 if (canPlaceCallsTo) {
                     final CharSequence displayNumber =
                             mPhoneNumberHelper.getDisplayNumber(
-                                    firstDetails.number, firstDetails.formattedNumber);
+                                    firstDetails.number,
+                                    firstDetails.numberPresentation,
+                                    firstDetails.formattedNumber);
 
                     ViewEntry entry = new ViewEntry(
                             getString(R.string.menu_callNumber,
@@ -527,9 +536,9 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
 
                     // The secondary action allows to send an SMS to the number that placed the
                     // call.
-                    if (mPhoneNumberHelper.canSendSmsTo(mNumber)) {
+                    if (phoneUtils.canSendSmsTo(mNumber, numberPresentation)) {
                         entry.setSecondaryAction(
-                                R.drawable.ic_text_holo_dark,
+                                R.drawable.ic_text_holo_light,
                                 new Intent(Intent.ACTION_SENDTO,
                                            Uri.fromParts("sms", mNumber, null)),
                                 getString(R.string.description_send_text_message, nameOrNumber));
@@ -560,7 +569,7 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                             private View mControls = findViewById(R.id.controls);
                             private View mPhoto = findViewById(R.id.contact_background_sizer);
                             private View mHeader = findViewById(R.id.photo_text_bar);
-                            private View mSeparator = findViewById(R.id.blue_separator);
+                        private View mSeparator = findViewById(R.id.separator);
 
                             @Override
                             public void setOffset(int offset) {
@@ -598,10 +607,12 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
             }
 
             // Read call log specifics.
-            String number = callCursor.getString(NUMBER_COLUMN_INDEX);
-            long date = callCursor.getLong(DATE_COLUMN_INDEX);
-            long duration = callCursor.getLong(DURATION_COLUMN_INDEX);
-            int callType = callCursor.getInt(CALL_TYPE_COLUMN_INDEX);
+            final String number = callCursor.getString(NUMBER_COLUMN_INDEX);
+            final int numberPresentation = callCursor.getInt(
+                    NUMBER_PRESENTATION_COLUMN_INDEX);
+            final long date = callCursor.getLong(DATE_COLUMN_INDEX);
+            final long duration = callCursor.getLong(DURATION_COLUMN_INDEX);
+            final int callType = callCursor.getInt(CALL_TYPE_COLUMN_INDEX);
             String countryIso = callCursor.getString(COUNTRY_ISO_COLUMN_INDEX);
             final String geocode = callCursor.getString(GEOCODED_LOCATION_COLUMN_INDEX);
 
@@ -619,12 +630,13 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
             final Uri lookupUri;
             // If this is not a regular number, there is no point in looking it up in the contacts.
             ContactInfo info =
-                    mPhoneNumberHelper.canPlaceCallsTo(number)
-                    && !mPhoneNumberHelper.isVoicemailNumber(number)
+                    PhoneNumberUtilsWrapper.canPlaceCallsTo(number, numberPresentation)
+                    && !new PhoneNumberUtilsWrapper().isVoicemailNumber(number)
                             ? mContactInfoHelper.lookupNumber(number, countryIso)
                             : null;
             if (info == null) {
-                formattedNumber = mPhoneNumberHelper.getDisplayNumber(number, null);
+                formattedNumber = mPhoneNumberHelper.getDisplayNumber(number,
+                        numberPresentation, null);
                 nameText = "";
                 numberType = 0;
                 numberLabel = "";
@@ -638,7 +650,8 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                 photoUri = info.photoUri;
                 lookupUri = info.lookupUri;
             }
-            return new PhoneCallDetails(number, formattedNumber, countryIso, geocode,
+            return new PhoneCallDetails(number, numberPresentation,
+                    formattedNumber, countryIso, geocode,
                     new int[]{ callType }, date, duration,
                     nameText, numberType, numberLabel, lookupUri, photoUri);
         } finally {
@@ -782,20 +795,6 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
         return super.onPrepareOptionsMenu(menu);
     }
 
-    @Override
-    public boolean onMenuItemSelected(int featureId, MenuItem item) {
-        switch (item.getItemId()) {
-            case android.R.id.home: {
-                onHomeSelected();
-                return true;
-            }
-
-            // All the options menu items are handled by onMenu... methods.
-            default:
-                throw new IllegalArgumentException();
-        }
-    }
-
     public void onMenuRemoveFromCallLog(MenuItem menuItem) {
         final StringBuilder callIds = new StringBuilder();
         for (Uri callUri : getCallLogEntryUris()) {
@@ -838,13 +837,6 @@ public class CallDetailActivity extends Activity implements ProximitySensorAware
                         finish();
                     }
                 });
-    }
-
-    private void configureActionBar() {
-        ActionBar actionBar = getActionBar();
-        if (actionBar != null) {
-            actionBar.setDisplayOptions(ActionBar.DISPLAY_HOME_AS_UP | ActionBar.DISPLAY_SHOW_HOME);
-        }
     }
 
     /** Invoked when the user presses the home button in the action bar. */

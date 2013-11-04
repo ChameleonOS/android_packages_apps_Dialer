@@ -18,6 +18,7 @@ package com.android.dialer.calllog;
 
 import android.content.ContentValues;
 import android.content.Context;
+import android.content.Intent;
 import android.content.res.Resources;
 import android.database.Cursor;
 import android.net.Uri;
@@ -29,7 +30,10 @@ import android.text.TextUtils;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.ViewStub;
 import android.view.ViewTreeObserver;
+import android.widget.ImageView;
+import android.widget.TextView;
 
 import com.android.common.widget.GroupingListAdapter;
 import com.android.contacts.common.ContactPhotoManager;
@@ -46,8 +50,9 @@ import java.util.LinkedList;
 /**
  * Adapter class to fill in data for the Call Log.
  */
-/*package*/ class CallLogAdapter extends GroupingListAdapter
+public class CallLogAdapter extends GroupingListAdapter
         implements ViewTreeObserver.OnPreDrawListener, CallLogGroupBuilder.GroupCreator {
+
     /** Interface used to initiate a refresh of the content. */
     public interface CallFetcher {
         public void fetchCalls();
@@ -90,7 +95,7 @@ import java.util.LinkedList;
     /** The size of the cache of contact info. */
     private static final int CONTACT_INFO_CACHE_SIZE = 100;
 
-    private final Context mContext;
+    protected final Context mContext;
     private final ContactInfoHelper mContactInfoHelper;
     private final CallFetcher mCallFetcher;
     private ViewTreeObserver mViewTreeObserver = null;
@@ -178,26 +183,39 @@ import java.util.LinkedList;
     /** Can be set to true by tests to disable processing of requests. */
     private volatile boolean mRequestProcessingDisabled = false;
 
-    /** Listener for the primary action in the list, opens the call details. */
-    private final View.OnClickListener mPrimaryActionListener = new View.OnClickListener() {
+    /** True if CallLogAdapter is created from the PhoneFavoriteFragment, where the primary
+     * action should be set to call a number instead of opening the detail page. */
+    private boolean mUseCallAsPrimaryAction = false;
+
+    private boolean mIsCallLog = true;
+    private int mNumMissedCalls = 0;
+    private int mNumMissedCallsShown = 0;
+
+    private View mBadgeContainer;
+    private ImageView mBadgeImageView;
+    private TextView mBadgeText;
+
+    /** Listener for the primary or secondary actions in the list.
+     *  Primary opens the call details.
+     *  Secondary calls or plays.
+     **/
+    private final View.OnClickListener mActionListener = new View.OnClickListener() {
         @Override
         public void onClick(View view) {
-            IntentProvider intentProvider = (IntentProvider) view.getTag();
-            if (intentProvider != null) {
-                mContext.startActivity(intentProvider.getIntent(mContext));
-            }
+            startActivityForAction(view);
         }
     };
-    /** Listener for the secondary action in the list, either call or play. */
-    private final View.OnClickListener mSecondaryActionListener = new View.OnClickListener() {
-        @Override
-        public void onClick(View view) {
-            IntentProvider intentProvider = (IntentProvider) view.getTag();
-            if (intentProvider != null) {
-                mContext.startActivity(intentProvider.getIntent(mContext));
+
+    private void startActivityForAction(View view) {
+        final IntentProvider intentProvider = (IntentProvider) view.getTag();
+        if (intentProvider != null) {
+            final Intent intent = intentProvider.getIntent(mContext);
+            // See IntentProvider.getCallDetailIntentProvider() for why this may be null.
+            if (intent != null) {
+                mContext.startActivity(intent);
             }
         }
-    };
+    }
 
     @Override
     public boolean onPreDraw() {
@@ -227,13 +245,16 @@ import java.util.LinkedList;
         }
     };
 
-    CallLogAdapter(Context context, CallFetcher callFetcher,
-            ContactInfoHelper contactInfoHelper) {
+    public CallLogAdapter(Context context, CallFetcher callFetcher,
+            ContactInfoHelper contactInfoHelper, boolean useCallAsPrimaryAction,
+            boolean isCallLog) {
         super(context);
 
         mContext = context;
         mCallFetcher = callFetcher;
         mContactInfoHelper = contactInfoHelper;
+        mUseCallAsPrimaryAction = useCallAsPrimaryAction;
+        mIsCallLog = isCallLog;
 
         mContactInfoCache = ExpirableCache.create(CONTACT_INFO_CACHE_SIZE);
         mRequests = new LinkedList<ContactInfoRequest>();
@@ -244,7 +265,7 @@ import java.util.LinkedList;
         mContactPhotoManager = ContactPhotoManager.getInstance(mContext);
         mPhoneNumberHelper = new PhoneNumberHelper(resources);
         PhoneCallDetailsHelper phoneCallDetailsHelper = new PhoneCallDetailsHelper(
-                resources, callTypeHelper, mPhoneNumberHelper);
+                resources, callTypeHelper, new PhoneNumberUtilsWrapper());
         mCallLogViewsHelper =
                 new CallLogListItemHelper(
                         phoneCallDetailsHelper, mPhoneNumberHelper, resources);
@@ -259,7 +280,7 @@ import java.util.LinkedList;
         mCallFetcher.fetchCalls();
     }
 
-    void setLoading(boolean loading) {
+    public void setLoading(boolean loading) {
         mLoading = loading;
     }
 
@@ -331,8 +352,7 @@ import java.util.LinkedList;
      * up the contact information (if it has not been already started). Otherwise, it will be
      * started with a delay. See {@link #START_PROCESSING_REQUESTS_DELAY_MILLIS}.
      */
-    @VisibleForTesting
-    void enqueueRequest(String number, String countryIso, ContactInfo callLogInfo,
+    protected void enqueueRequest(String number, String countryIso, ContactInfo callLogInfo,
             boolean immediate) {
         ContactInfoRequest request = new ContactInfoRequest(number, countryIso, callLogInfo);
         synchronized (mRequests) {
@@ -367,7 +387,8 @@ import java.util.LinkedList;
         // view.
         NumberWithCountryIso numberCountryIso = new NumberWithCountryIso(number, countryIso);
         ContactInfo existingInfo = mContactInfoCache.getPossiblyExpired(numberCountryIso);
-        boolean updated = (existingInfo != ContactInfo.EMPTY) && !info.equals(existingInfo);
+
+        boolean updated = !info.equals(existingInfo);
 
         // Store the data in the cache so that the UI thread can use to display it. Store it
         // even if it has not changed so that it is marked as not expired.
@@ -442,8 +463,17 @@ import java.util.LinkedList;
 
     @Override
     protected View newStandAloneView(Context context, ViewGroup parent) {
-        LayoutInflater inflater =
-                (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
+        return newChildView(context, parent);
+    }
+
+    @Override
+    protected View newGroupView(Context context, ViewGroup parent) {
+        return newChildView(context, parent);
+    }
+
+    @Override
+    protected View newChildView(Context context, ViewGroup parent) {
+        LayoutInflater inflater = (LayoutInflater) context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
         View view = inflater.inflate(R.layout.call_log_list_item, parent, false);
         findAndCacheViews(view);
         return view;
@@ -455,26 +485,8 @@ import java.util.LinkedList;
     }
 
     @Override
-    protected View newChildView(Context context, ViewGroup parent) {
-        LayoutInflater inflater =
-                (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
-        View view = inflater.inflate(R.layout.call_log_list_item, parent, false);
-        findAndCacheViews(view);
-        return view;
-    }
-
-    @Override
     protected void bindChildView(View view, Context context, Cursor cursor) {
         bindView(view, cursor, 1);
-    }
-
-    @Override
-    protected View newGroupView(Context context, ViewGroup parent) {
-        LayoutInflater inflater =
-                (LayoutInflater)context.getSystemService(Context.LAYOUT_INFLATER_SERVICE);
-        View view = inflater.inflate(R.layout.call_log_list_item, parent, false);
-        findAndCacheViews(view);
-        return view;
     }
 
     @Override
@@ -486,8 +498,8 @@ import java.util.LinkedList;
     private void findAndCacheViews(View view) {
         // Get the views to bind to.
         CallLogListItemViews views = CallLogListItemViews.fromView(view);
-        views.primaryActionView.setOnClickListener(mPrimaryActionListener);
-        views.secondaryActionView.setOnClickListener(mSecondaryActionListener);
+        views.primaryActionView.setOnClickListener(mActionListener);
+        views.secondaryActionView.setOnClickListener(mActionListener);
         view.setTag(views);
     }
 
@@ -500,27 +512,13 @@ import java.util.LinkedList;
      */
     private void bindView(View view, Cursor c, int count) {
         final CallLogListItemViews views = (CallLogListItemViews) view.getTag();
-        final int section = c.getInt(CallLogQuery.SECTION);
 
-        // This might be a header: check the value of the section column in the cursor.
-        if (section == CallLogQuery.SECTION_NEW_HEADER
-                || section == CallLogQuery.SECTION_OLD_HEADER) {
-            views.primaryActionView.setVisibility(View.GONE);
-            views.bottomDivider.setVisibility(View.GONE);
-            views.listHeaderTextView.setVisibility(View.VISIBLE);
-            views.listHeaderTextView.setText(
-                    section == CallLogQuery.SECTION_NEW_HEADER
-                            ? R.string.call_log_new_header
-                            : R.string.call_log_old_header);
-            // Nothing else to set up for a header.
-            return;
-        }
         // Default case: an item in the call log.
         views.primaryActionView.setVisibility(View.VISIBLE);
-        views.bottomDivider.setVisibility(isLastOfSection(c) ? View.GONE : View.VISIBLE);
         views.listHeaderTextView.setVisibility(View.GONE);
 
         final String number = c.getString(CallLogQuery.NUMBER);
+        final int numberPresentation = c.getInt(CallLogQuery.NUMBER_PRESENTATION);
         final long date = c.getLong(CallLogQuery.DATE);
         final long duration = c.getLong(CallLogQuery.DURATION);
         final int callType = c.getInt(CallLogQuery.CALL_TYPE);
@@ -528,9 +526,18 @@ import java.util.LinkedList;
 
         final ContactInfo cachedContactInfo = getContactInfoFromCallLog(c);
 
-        views.primaryActionView.setTag(
-                IntentProvider.getCallDetailIntentProvider(
-                        this, c.getPosition(), c.getLong(CallLogQuery.ID), count));
+        if (!mUseCallAsPrimaryAction) {
+            // Sets the primary action to open call detail page.
+            views.primaryActionView.setTag(
+                    IntentProvider.getCallDetailIntentProvider(
+                            getCursor(), c.getPosition(), c.getLong(CallLogQuery.ID), count));
+        } else if (PhoneNumberUtilsWrapper.canPlaceCallsTo(number, numberPresentation)) {
+            // Sets the primary action to call the number.
+            views.primaryActionView.setTag(IntentProvider.getReturnCallIntentProvider(number));
+        } else {
+            views.primaryActionView.setTag(null);
+        }
+
         // Store away the voicemail information so we can play it directly.
         if (callType == Calls.VOICEMAIL_TYPE) {
             String voicemailUri = c.getString(CallLogQuery.VOICEMAIL_URI);
@@ -551,8 +558,8 @@ import java.util.LinkedList;
         ExpirableCache.CachedValue<ContactInfo> cachedInfo =
                 mContactInfoCache.getCachedValue(numberCountryIso);
         ContactInfo info = cachedInfo == null ? null : cachedInfo.getValue();
-        if (!mPhoneNumberHelper.canPlaceCallsTo(number)
-                || mPhoneNumberHelper.isVoicemailNumber(number)) {
+        if (!PhoneNumberUtilsWrapper.canPlaceCallsTo(number, numberPresentation)
+                || new PhoneNumberUtilsWrapper().isVoicemailNumber(number)) {
             // If this is a number that cannot be dialed, there is no point in looking up a contact
             // for it.
             info = ContactInfo.EMPTY;
@@ -588,40 +595,145 @@ import java.util.LinkedList;
         final int ntype = info.type;
         final String label = info.label;
         final long photoId = info.photoId;
+        final Uri photoUri = info.photoUri;
         CharSequence formattedNumber = info.formattedNumber;
         final int[] callTypes = getCallTypes(c, count);
         final String geocode = c.getString(CallLogQuery.GEOCODED_LOCATION);
         final PhoneCallDetails details;
+
         if (TextUtils.isEmpty(name)) {
-            details = new PhoneCallDetails(number, formattedNumber, countryIso, geocode,
-                    callTypes, date, duration);
+            details = new PhoneCallDetails(number, numberPresentation,
+                    formattedNumber, countryIso, geocode, callTypes, date,
+                    duration);
         } else {
-            // We do not pass a photo id since we do not need the high-res picture.
-            details = new PhoneCallDetails(number, formattedNumber, countryIso, geocode,
-                    callTypes, date, duration, name, ntype, label, lookupUri, null);
+            details = new PhoneCallDetails(number, numberPresentation,
+                    formattedNumber, countryIso, geocode, callTypes, date,
+                    duration, name, ntype, label, lookupUri, photoUri);
         }
 
         final boolean isNew = c.getInt(CallLogQuery.IS_READ) == 0;
         // New items also use the highlighted version of the text.
         final boolean isHighlighted = isNew;
-        mCallLogViewsHelper.setPhoneCallDetails(views, details, isHighlighted);
-        setPhoto(views, photoId, lookupUri);
+        mCallLogViewsHelper.setPhoneCallDetails(views, details, isHighlighted,
+                mUseCallAsPrimaryAction);
+
+        if (photoId == 0 && photoUri != null) {
+            setPhoto(views, photoUri, lookupUri);
+        } else {
+            setPhoto(views, photoId, lookupUri);
+        }
+
+        views.quickContactView.setContentDescription(views.phoneCallDetailsViews.nameView.
+                getText());
 
         // Listen for the first draw
         if (mViewTreeObserver == null) {
             mViewTreeObserver = view.getViewTreeObserver();
             mViewTreeObserver.addOnPreDrawListener(this);
         }
+
+        bindBadge(view, info, details, callType);
     }
 
-    /** Returns true if this is the last item of a section. */
-    private boolean isLastOfSection(Cursor c) {
-        if (c.isLast()) return true;
-        final int section = c.getInt(CallLogQuery.SECTION);
-        if (!c.moveToNext()) return true;
-        final int nextSection = c.getInt(CallLogQuery.SECTION);
-        c.moveToPrevious();
-        return section != nextSection;
+    protected void bindBadge(View view, ContactInfo info, PhoneCallDetails details, int callType) {
+
+        // Do not show badge in call log.
+        if (!mIsCallLog) {
+            final int numMissed = getNumMissedCalls(callType);
+            final ViewStub stub = (ViewStub) view.findViewById(R.id.link_stub);
+
+            if (shouldShowBadge(numMissed, info, details)) {
+                // Do not process if the data has not changed (optimization since bind view is
+                // called multiple times due to contact lookup).
+                if (numMissed == mNumMissedCallsShown) {
+                    return;
+                }
+
+                // stub will be null if it was already inflated.
+                if (stub != null) {
+                    final View inflated = stub.inflate();
+                    inflated.setVisibility(View.VISIBLE);
+                    mBadgeContainer = inflated.findViewById(R.id.badge_link_container);
+                    mBadgeImageView = (ImageView) inflated.findViewById(R.id.badge_image);
+                    mBadgeText = (TextView) inflated.findViewById(R.id.badge_text);
+                }
+
+                mBadgeContainer.setOnClickListener(getBadgeClickListener());
+                mBadgeImageView.setImageResource(getBadgeImageResId());
+                mBadgeText.setText(getBadgeText(numMissed));
+
+                mNumMissedCallsShown = numMissed;
+            } else {
+                // Hide badge if it was previously shown.
+                if (stub == null) {
+                    final View container = view.findViewById(R.id.badge_container);
+                    if (container != null) {
+                        container.setVisibility(View.GONE);
+                    }
+                }
+            }
+        }
+    }
+
+    public void setMissedCalls(Cursor data) {
+        final int missed;
+        if (data == null) {
+            missed = 0;
+        } else {
+            missed = data.getCount();
+        }
+        // Only need to update if the number of calls changed.
+        if (missed != mNumMissedCalls) {
+            mNumMissedCalls = missed;
+            notifyDataSetChanged();
+        }
+    }
+
+    protected View.OnClickListener getBadgeClickListener() {
+        return new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                final Intent intent = new Intent(mContext, CallLogActivity.class);
+                mContext.startActivity(intent);
+            }
+        };
+    }
+
+    /**
+     * Get the resource id for the image to be shown for the badge.
+     */
+    protected int getBadgeImageResId() {
+        return R.drawable.ic_call_log_blue;
+    }
+
+    /**
+     * Get the text to be shown for the badge.
+     *
+     * @param numMissed The number of missed calls.
+     */
+    protected String getBadgeText(int numMissed) {
+        return mContext.getResources().getString(R.string.num_missed_calls, numMissed);
+    }
+
+    /**
+     * Whether to show the badge.
+     *
+     * @param numMissedCalls The number of missed calls.
+     * @param info The contact info.
+     * @param details The call detail.
+     * @return {@literal true} if badge should be shown.  {@literal false} otherwise.
+     */
+    protected boolean shouldShowBadge(int numMissedCalls, ContactInfo info,
+            PhoneCallDetails details) {
+        return numMissedCalls > 0;
+    }
+
+    private int getNumMissedCalls(int callType) {
+        if (callType == Calls.MISSED_TYPE) {
+            // Exclude the current missed call shown in the shortcut.
+            return mNumMissedCalls - 1;
+        }
+        return mNumMissedCalls;
     }
 
     /** Checks whether the contact info from the call log matches the one from the contacts db. */
@@ -736,8 +848,15 @@ import java.util.LinkedList;
 
     private void setPhoto(CallLogListItemViews views, long photoId, Uri contactUri) {
         views.quickContactView.assignContactUri(contactUri);
-        mContactPhotoManager.loadThumbnail(views.quickContactView, photoId, true);
+        mContactPhotoManager.loadThumbnail(views.quickContactView, photoId, false /* darkTheme */);
     }
+
+    private void setPhoto(CallLogListItemViews views, Uri photoUri, Uri contactUri) {
+        views.quickContactView.assignContactUri(contactUri);
+        mContactPhotoManager.loadDirectoryPhoto(views.quickContactView, photoUri,
+                false /* darkTheme */);
+    }
+
 
     /**
      * Sets whether processing of requests for contact details should be enabled.
